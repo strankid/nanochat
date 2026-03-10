@@ -119,6 +119,9 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
+    track_sparsity = False
+    sparsity_log = []  # list of (natural_sparsity, drop_rate) per layer per forward pass
+
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
@@ -127,6 +130,19 @@ class MLP(nn.Module):
     def forward(self, x):
         x = self.c_fc(x)
         x = F.relu(x).square()
+        if MLP.track_sparsity:
+            with torch.no_grad():
+                n_total = x.numel()
+                n_nz = (x != 0).sum().item()
+                sparsity = 1.0 - n_nz / n_total
+                # 2:4 drop rate: how many non-zeros get killed by enforcing top-2 per group of 4
+                flat = x.view(-1, 4)
+                _, idx = torch.topk(flat.abs(), k=2, dim=-1)
+                mask = torch.zeros_like(flat)
+                mask.scatter_(-1, idx, 1.0)
+                n_nz_after = ((flat * mask) != 0).sum().item()
+                drop = (n_nz - n_nz_after) / max(n_nz, 1)
+                MLP.sparsity_log.append((sparsity, drop))
         x = self.c_proj(x)
         return x
 

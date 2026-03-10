@@ -45,6 +45,9 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
+# 2:4 Activation Sparsity
+parser.add_argument("--sparse24", action="store_true", help="enable 2:4 activation sparsity on MLP layers")
+parser.add_argument("--sparse24-emulate", action="store_true", help="emulate sparse24 without sparse hardware (for testing)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -231,6 +234,16 @@ def disable_fp8(model):
         # Restore Float8Linear modules
         for parent, attr_name, fp8_module in fp8_locations:
             setattr(parent, attr_name, fp8_module)
+
+# -----------------------------------------------------------------------------
+# 2:4 Activation Sparsity (after FP8, before compile)
+
+if args.sparse24:
+    from nanochat.sparse24 import convert_model_to_sparse24
+    emulate = args.sparse24_emulate or device_type != "cuda"
+    num_sparse_layers = convert_model_to_sparse24(model, emulate=emulate)
+    mode = "emulated" if emulate else "hardware-accelerated"
+    print0(f"✓ 2:4 activation sparsity enabled ({mode}) - converted {num_sparse_layers} MLP layers")
 
 # -----------------------------------------------------------------------------
 # Compile the model
@@ -481,6 +494,20 @@ while True:
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
         break
+
+    # measure activation sparsity every 500 steps on orig_model (uncompiled, shares weights)
+    if step % 500 == 0:
+        from nanochat.gpt import MLP
+        MLP.track_sparsity = True
+        MLP.sparsity_log.clear()
+        with torch.no_grad(), autocast_ctx:
+            orig_model(x, y)
+        MLP.track_sparsity = False
+        sps = [s for s, d in MLP.sparsity_log]
+        drs = [d for s, d in MLP.sparsity_log]
+        avg_sp = sum(sps) / len(sps) if sps else 0
+        avg_dr = sum(drs) / len(drs) if drs else 0
+        print0(f"  [sparsity] step {step}: avg={avg_sp:.1%} drop={avg_dr:.2%} | {' '.join(f'{s:.0%}' for s in sps)}")
 
     # -------------------------------------------------------------------------
     # single training step
