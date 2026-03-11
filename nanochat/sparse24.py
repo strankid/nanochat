@@ -290,26 +290,33 @@ class Sparse24MLP(nn.Module):
         x_2d = x.reshape(-1, K)
         M = x_2d.shape[0]
 
-        use_hw = (
-            not self.emulate
-            and _TRITON_AVAILABLE
-            and _CUTLASS_SPARSE_AVAILABLE
-            and x_2d.dtype in (torch.float16, torch.bfloat16)
-            and K % 16 == 0
-            and M % 32 == 0  # CUTLASS minimum
-            and K >= 64      # CUTLASS minimum
-        )
-
-        if use_hw:
-            y_2d = _sparse24_forward(x_2d, self.c_proj.weight)
-        elif not self.emulate and _CUSPARSELT_AVAILABLE and x_2d.dtype in (torch.float16, torch.bfloat16):
-            x_masked = apply_24_sparsity(x_2d)
-            from torch.sparse import to_sparse_semi_structured
-            x_sparse = to_sparse_semi_structured(x_masked)
-            y_2d = torch.mm(x_sparse, self.c_proj.weight.t())
-        else:
+        # During eval, skip hardware sparse path — the Triton kernel + CUTLASS
+        # overhead isn't amortized for the many small forward passes in eval.
+        # Use dense matmul with the 2:4 mask applied (mathematically equivalent).
+        if not self.training:
             x_masked = apply_24_sparsity(x_2d)
             y_2d = x_masked @ self.c_proj.weight.t()
+        else:
+            use_hw = (
+                not self.emulate
+                and _TRITON_AVAILABLE
+                and _CUTLASS_SPARSE_AVAILABLE
+                and x_2d.dtype in (torch.float16, torch.bfloat16)
+                and K % 16 == 0
+                and M % 32 == 0  # CUTLASS minimum
+                and K >= 64      # CUTLASS minimum
+            )
+
+            if use_hw:
+                y_2d = _sparse24_forward(x_2d, self.c_proj.weight)
+            elif not self.emulate and _CUSPARSELT_AVAILABLE and x_2d.dtype in (torch.float16, torch.bfloat16):
+                x_masked = apply_24_sparsity(x_2d)
+                from torch.sparse import to_sparse_semi_structured
+                x_sparse = to_sparse_semi_structured(x_masked)
+                y_2d = torch.mm(x_sparse, self.c_proj.weight.t())
+            else:
+                x_masked = apply_24_sparsity(x_2d)
+                y_2d = x_masked @ self.c_proj.weight.t()
 
         return y_2d.reshape(*leading, -1)
 
