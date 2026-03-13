@@ -435,8 +435,7 @@ while True:
     # use the original uncompiled model because the inputs keep changing shape
     # disable FP8 for evaluation to use BF16 for more consistent/accurate results
     results = {}
-    # TODO: undo this -- skipping CORE eval when max_per_task=0 so quick benchmarks don't block on eval
-    if args.core_metric_every > 0 and args.core_metric_max_per_task != 0 and (last_step or (step > 0 and step % args.core_metric_every == 0)):
+    if args.core_metric_every > 0 and (last_step or (step > 0 and step % args.core_metric_every == 0)):
         model.eval()
         with disable_fp8(orig_model), autocast_ctx:
             results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
